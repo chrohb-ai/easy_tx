@@ -1,0 +1,3 @@
+[submodule "electrum"]
+	path = electrum
+	url = https://github.com/spesmilo/electrum.git
