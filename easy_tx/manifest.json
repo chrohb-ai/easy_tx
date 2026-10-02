@@ -1,0 +1,6 @@
+{
+    "name": "easy_tx",
+    "fullname": "Easy TX",
+    "description": "Shows the xpub of the currently loaded wallet.",
+    "available_for": ["qt"]
+}
