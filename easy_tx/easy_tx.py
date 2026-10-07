@@ -161,24 +161,32 @@ def fill_bip32_paths(txin: PartialTxInput, desc: Descriptor) -> None:
         txin.bip32_paths[pp.get_pubkey_bytes()] = (fingerprint, path + pp.get_der_suffix_int_list())
 
 
-def get_mempool_api_url() -> str:
-    url = MEMPOOL_API.get(constants.net.NET_NAME)
-    if url is None:
-        raise ValueError(f'no mempool API known for network {constants.net.NET_NAME!r}; paste the raw transaction instead')
-    return url
+class MempoolApiError(ValueError):
+    """The transaction could not be fetched from the mempool API."""
 
 
-def load_transaction(text: str) -> Union[Transaction, PartialTransaction]:
-    """Loads a tx from a txid (fetched from the mempool API), raw tx hex, or PSBT (hex or base64).
-    Blocking; call from a non-GUI thread."""
+def get_default_mempool_api_url() -> str:
+    """Returns the default mempool API for the current network, or '' if none is known."""
+    return MEMPOOL_API.get(constants.net.NET_NAME, '')
+
+
+def load_transaction(text: str, api_url: Optional[str] = None) -> Union[Transaction, PartialTransaction]:
+    """Loads a tx from a txid (fetched from the mempool API at api_url, or the network default),
+    raw tx hex, or PSBT (hex or base64). Blocking; call from a non-GUI thread."""
     text = re.sub(r'\s', '', text)
     if not text:
         raise ValueError('enter a txid, raw transaction or PSBT')
     if re.fullmatch(r'[0-9a-fA-F]{64}', text):
-        raw = Network.send_http_on_proxy('get', f'{get_mempool_api_url()}/tx/{text.lower()}/hex', timeout=30)
+        api_url = (api_url or '').strip().rstrip('/') or get_default_mempool_api_url()
+        if not api_url:
+            raise MempoolApiError(f'no mempool API known for network {constants.net.NET_NAME!r}')
+        try:
+            raw = Network.send_http_on_proxy('get', f'{api_url}/tx/{text.lower()}/hex', timeout=30)
+        except Exception as e:
+            raise MempoolApiError(f'could not fetch the transaction from {api_url} ({e})') from e
         tx = tx_from_any(raw.strip())
         if tx.txid() != text.lower():
-            raise ValueError('mempool API returned a transaction with a different txid')
+            raise MempoolApiError('mempool API returned a transaction with a different txid')
         return tx
     tx = tx_from_any(text)
     if tx.txid() is None:

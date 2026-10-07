@@ -15,6 +15,7 @@ from electrum.gui.qt.amountedit import BTCAmountEdit
 from electrum.gui.qt.qrtextedit import ShowQRTextEdit
 
 from .easy_tx import (EasyTxPlugin, WalletDescriptor, OutputMatch, get_wallet_descriptor, load_transaction,
+                      get_default_mempool_api_url, MempoolApiError,
                       make_input, make_sequence, describe_sequence, build_psbt, MAX_RELATIVE_LOCKTIME)
 
 if TYPE_CHECKING:
@@ -72,6 +73,8 @@ class CreatePSBTDialog(QDialog):
         self.loaded_tx = None  # type: Optional[Transaction]
         self.loaded_desc = None  # type: Optional[WalletDescriptor]
         self.loaded_matches = {}  # type: Dict[int, OutputMatch]
+        # mempool API used for txids; the user is only asked for another one if fetching fails
+        self.api_url = get_default_mempool_api_url()
         # addresses per descriptor branch searched by "Show outputs"; raised on demand if nothing matches
         self.gap_limit = max(DEFAULT_GAP_LIMIT, getattr(window.wallet, 'gap_limit', DEFAULT_GAP_LIMIT))
 
@@ -248,11 +251,27 @@ class CreatePSBTDialog(QDialog):
             self.window.show_error(_('Invalid descriptor') + f':\n{e}', parent=self)
             return
         source = self.source_edit.toPlainText()
+        self._load_and_scan(source, desc)
+
+    def _load_and_scan(self, source: str, desc: WalletDescriptor):
+        api_url = self.api_url
 
         def on_error(exc_info):
-            self.window.show_error(_('Could not load transaction') + f':\n{exc_info[1]}', parent=self)
+            exc = exc_info[1]
+            if not isinstance(exc, MempoolApiError):
+                self.window.show_error(_('Could not load transaction') + f':\n{exc}', parent=self)
+                return
+            new_url, ok = QInputDialog.getText(
+                self, _('Could not load transaction'),
+                f'{exc}\n\n' + _('The API may be unreachable or may not know this transaction.') + '\n'
+                + _('Enter the URL of another mempool.space-compatible API to retry:'),
+                text=api_url)
+            new_url = new_url.strip().rstrip('/')
+            if ok and new_url:
+                self.api_url = new_url
+                self._load_and_scan(source, desc)
 
-        WaitingDialog(self, _('Loading transaction...'), lambda: load_transaction(source),
+        WaitingDialog(self, _('Loading transaction...'), lambda: load_transaction(source, api_url),
                       lambda tx: self._scan_outputs(tx, desc, self.gap_limit), on_error)
 
     def _scan_outputs(self, tx: Transaction, desc: WalletDescriptor, gap_limit: int):

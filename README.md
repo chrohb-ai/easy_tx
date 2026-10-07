@@ -16,6 +16,7 @@ An Electrum plugin to create PSBTs. The inputs for the PSBT do not have to be pa
    - Press **Add selected output as input** to add the input to your transaction.
    - Optionally, you can set a relative timelock.
    - If a txid is entered, the full transaction is fetched from the [mempool.space](https://mempool.space) API.
+   - If the API is not reachable or does not know the transaction, you are asked for the URL of another mempool.space-compatible API (e.g. your own instance) to retry with.
 4. **Add outputs:** Enter an address and amount, then press **Add output**.
 5. **Create transaction:** Press **Build PSBT**.
 
