@@ -216,6 +216,12 @@ def make_input(parent: Transaction, out_idx: int, desc: Descriptor, nsequence: i
                           nsequence=nsequence)
     if parent.is_complete():
         txin.utxo = parent
+    else:
+        # the txid of an unsigned PSBT with only segwit inputs does not depend on the missing witnesses,
+        # so its witness-stripped serialization is a valid non-witness UTXO (needed by many signers)
+        stripped = Transaction(parent.serialize_to_network(force_legacy=True))
+        if parent.txid() is not None and stripped.txid() == parent.txid():
+            txin.utxo = stripped
     if desc.is_segwit():
         txin.witness_utxo = parent.outputs()[out_idx]
     if txin.utxo is None and txin.witness_utxo is None:
