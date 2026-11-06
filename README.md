@@ -18,6 +18,7 @@ An Electrum plugin to create PSBTs. The inputs for the PSBT do not have to be pa
    - If a txid is entered, the full transaction is fetched from the [mempool.space](https://mempool.space) API.
    - If the API is not reachable or does not know the transaction, you are asked for the URL of another mempool.space-compatible API (e.g. your own instance) to retry with.
 4. **Add outputs:** Enter an address and amount, then press **Add output**.
+   - Outputs that belong to the wallet of an added input are marked in the list and get their derivation in the PSBT, so a hardware wallet can recognise them as its own instead of as an external payment. Whether the address is still displayed depends on the device; addresses on the change branch are the most likely to be recognised. Only addresses already searched by **Show outputs** are detected.
 5. **Create transaction:** Press **Build PSBT**.
 
 ## Screenshots

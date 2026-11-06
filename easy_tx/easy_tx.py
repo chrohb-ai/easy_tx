@@ -100,6 +100,8 @@ class WalletDescriptor:
             raise ValueError(f'descriptor checksum mismatch: got {checksum}, expected {DescriptorChecksum(body)}')
         self.branch_strs = self._expand_multipath(body)
         self.branches = [parse_descriptor(s) for s in self.branch_strs]
+        self._scripts = {}  # type: Dict[bytes, OutputMatch]
+        self._scanned_gap_limit = 0
 
     @staticmethod
     def _expand_multipath(body: str) -> List[str]:
@@ -122,15 +124,21 @@ class WalletDescriptor:
         return f'branch {branch}'
 
     def find_scripts(self, gap_limit: int) -> Dict[bytes, OutputMatch]:
-        """Returns scriptpubkey -> OutputMatch for the first `gap_limit` addresses of every branch."""
-        scripts = {}
-        for branch, desc in enumerate(self.branches):
-            if desc.is_range():
-                for pos in range(gap_limit):
-                    scripts[desc.expand(pos=pos).output_script] = OutputMatch(branch, pos)
-            else:
-                scripts[desc.expand().output_script] = OutputMatch(branch, None)
-        return scripts
+        """Returns scriptpubkey -> OutputMatch for at least the first `gap_limit` addresses of every branch."""
+        if gap_limit > self._scanned_gap_limit:
+            scripts = {}
+            for branch, desc in enumerate(self.branches):
+                if desc.is_range():
+                    for pos in range(gap_limit):
+                        scripts[desc.expand(pos=pos).output_script] = OutputMatch(branch, pos)
+                else:
+                    scripts[desc.expand().output_script] = OutputMatch(branch, None)
+            self._scripts, self._scanned_gap_limit = scripts, gap_limit
+        return self._scripts
+
+    def match_scanned_script(self, script: bytes) -> Optional[OutputMatch]:
+        """Looks up a scriptpubkey among the addresses already searched by find_scripts. Does not derive any keys."""
+        return self._scripts.get(script)
 
     def concrete_descriptor(self, match: OutputMatch) -> Descriptor:
         """Returns a non-ranged descriptor for a single address."""
@@ -148,8 +156,8 @@ class WalletDescriptor:
         return xpubs
 
 
-def fill_bip32_paths(txin: PartialTxInput, desc: Descriptor) -> None:
-    """Fills the PSBT BIP32 derivation fields of txin from a non-ranged descriptor."""
+def fill_bip32_paths(txinout: Union[PartialTxInput, PartialTxOutput], desc: Descriptor) -> None:
+    """Fills the PSBT BIP32 derivation fields of txinout from a non-ranged descriptor."""
     for pp in iter_pubkey_providers(desc):
         if pp.extkey is None:
             continue
@@ -158,7 +166,7 @@ def fill_bip32_paths(txin: PartialTxInput, desc: Descriptor) -> None:
         else:
             fingerprint, path = pp.extkey.calc_fingerprint_of_this_node(), []
         # note: pp.get_full_derivation_int_list() would prepend the fingerprint to the path
-        txin.bip32_paths[pp.get_pubkey_bytes()] = (fingerprint, path + pp.get_der_suffix_int_list())
+        txinout.bip32_paths[pp.get_pubkey_bytes()] = (fingerprint, path + pp.get_der_suffix_int_list())
 
 
 class MempoolApiError(ValueError):
@@ -231,6 +239,33 @@ def make_input(parent: Transaction, out_idx: int, desc: Descriptor, nsequence: i
     return txin
 
 
+def find_own_output(
+        script: bytes,
+        descriptors: Sequence[WalletDescriptor],
+) -> Optional[Tuple[WalletDescriptor, OutputMatch]]:
+    """Returns the first descriptor that contains the scriptpubkey (among its already searched addresses)."""
+    for desc in descriptors:
+        match = desc.match_scanned_script(script)
+        if match is not None:
+            return desc, match
+    return None
+
+
+def update_output_derivation(txout: PartialTxOutput, descriptors: Sequence[WalletDescriptor]) -> None:
+    """Sets the PSBT derivation fields of txout if it belongs to one of the descriptors, and clears them otherwise.
+    This lets a signer recognise the output as its own, after verifying the derivation against the scriptpubkey."""
+    txout.script_descriptor = None
+    txout.redeem_script = txout.witness_script = None
+    txout.bip32_paths.clear()
+    own = find_own_output(txout.scriptpubkey, descriptors)
+    if own is None:
+        return
+    desc, match = own
+    concrete = desc.concrete_descriptor(match)
+    txout.script_descriptor = concrete
+    fill_bip32_paths(txout, concrete)
+
+
 def build_psbt(
         inputs: Sequence[PartialTxInput],
         outputs: Sequence[PartialTxOutput],
@@ -238,6 +273,7 @@ def build_psbt(
         locktime: int,
         xpubs: Dict,
         rbf: bool = True,
+        own_descriptors: Sequence[WalletDescriptor] = (),
 ) -> PartialTransaction:
     if not inputs:
         raise ValueError('add at least one input')
@@ -250,6 +286,8 @@ def build_psbt(
     for txin in inputs:
         if txin.nsequence >= SEQUENCE_NO_RELATIVE_LOCKTIME:
             txin.nsequence = SEQUENCE_NO_RELATIVE_LOCKTIME if rbf else SEQUENCE_NO_RELATIVE_LOCKTIME_NO_RBF
+    for txout in outputs:
+        update_output_derivation(txout, own_descriptors)
     tx = PartialTransaction.from_io(list(inputs), list(outputs), locktime=locktime, version=2, BIP69_sort=False)
     tx.xpubs.update(xpubs)
     return tx

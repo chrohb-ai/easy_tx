@@ -16,7 +16,8 @@ from electrum.gui.qt.qrtextedit import ShowQRTextEdit
 
 from .easy_tx import (EasyTxPlugin, WalletDescriptor, OutputMatch, get_wallet_descriptor, load_transaction,
                       get_default_mempool_api_url, MempoolApiError,
-                      make_input, make_sequence, describe_sequence, build_psbt, MAX_RELATIVE_LOCKTIME)
+                      make_input, make_sequence, describe_sequence, build_psbt, find_own_output,
+                      MAX_RELATIVE_LOCKTIME)
 
 if TYPE_CHECKING:
     from electrum.gui.qt.main_window import ElectrumWindow
@@ -67,6 +68,7 @@ class CreatePSBTDialog(QDialog):
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
 
         self.inputs = []  # type: List[PartialTxInput]
+        self.input_descriptors = []  # type: List[WalletDescriptor]  # same order as self.inputs
         self.outputs = []  # type: List[PartialTxOutput]
         self.xpubs = {}  # global PSBT xpubs, collected from the descriptors of added inputs
         # result of the last "Show outputs"
@@ -164,7 +166,7 @@ class CreatePSBTDialog(QDialog):
         vbox.addLayout(hbox)
 
         self.outputs_list = QTreeWidget()
-        self.outputs_list.setHeaderLabels([_('Address'), _('Amount')])
+        self.outputs_list.setHeaderLabels([_('Address'), _('Amount'), _('In input wallet')])
         self.outputs_list.setRootIsDecorated(False)
         self.outputs_list.setMaximumHeight(110)
         vbox.addWidget(self.outputs_list)
@@ -241,6 +243,14 @@ class CreatePSBTDialog(QDialog):
         if match.pos is not None:
             label += f' #{match.pos}'
         return _('yes') + f' ({label})'
+
+    def _update_output_labels(self):
+        """Shows which outputs belong to the wallet of an added input, and so get derivation info in the PSBT."""
+        for i, txout in enumerate(self.outputs):
+            own = find_own_output(txout.scriptpubkey, self.input_descriptors)
+            self.outputs_list.topLevelItem(i).setText(2, self._match_label(*own) if own else _('no'))
+        for col in range(3):
+            self.outputs_list.resizeColumnToContents(col)
 
     # --- actions ---
 
@@ -328,20 +338,25 @@ class CreatePSBTDialog(QDialog):
             self.window.show_error(_('Could not add input') + f':\n{e}', parent=self)
             return
         self.inputs.append(txin)
+        self.input_descriptors.append(desc)
         self.xpubs.update(desc.global_xpubs())
         path = desc.branch_label(match.branch) + (f' #{match.pos}' if match.pos is not None else '')
         self.inputs_list.addTopLevelItem(QTreeWidgetItem([
             txin.prevout.to_str(), txin.address or '', self._fmt(txin.value_sats()), path, describe_sequence(nsequence)]))
         for col in range(5):
             self.inputs_list.resizeColumnToContents(col)
+        self._update_output_labels()
         self._invalidate_psbt()
 
     def on_remove_input(self):
         item = self.inputs_list.currentItem()
         if item is None:
             return
-        del self.inputs[self.inputs_list.indexOfTopLevelItem(item)]
-        self.inputs_list.takeTopLevelItem(self.inputs_list.indexOfTopLevelItem(item))
+        idx = self.inputs_list.indexOfTopLevelItem(item)
+        del self.inputs[idx]
+        del self.input_descriptors[idx]
+        self.inputs_list.takeTopLevelItem(idx)
+        self._update_output_labels()
         self._invalidate_psbt()
 
     def on_add_output(self):
@@ -355,8 +370,8 @@ class CreatePSBTDialog(QDialog):
             return
         txout = PartialTxOutput.from_address_and_value(address, amount)
         self.outputs.append(txout)
-        self.outputs_list.addTopLevelItem(QTreeWidgetItem([address, self._fmt(amount)]))
-        self.outputs_list.resizeColumnToContents(0)
+        self.outputs_list.addTopLevelItem(QTreeWidgetItem([address, self._fmt(amount), '']))
+        self._update_output_labels()
         self.address_edit.clear()
         self.amount_edit.clear()
         self._invalidate_psbt()
@@ -373,7 +388,7 @@ class CreatePSBTDialog(QDialog):
         try:
             locktime = int(self.locktime_edit.text().strip() or '0')
             psbt = build_psbt(self.inputs, self.outputs, locktime=locktime, xpubs=self.xpubs,
-                              rbf=self.rbf_checkbox.isChecked())
+                              rbf=self.rbf_checkbox.isChecked(), own_descriptors=self.input_descriptors)
         except Exception as e:
             self.window.show_error(_('Could not build PSBT') + f':\n{e}', parent=self)
             return
